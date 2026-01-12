@@ -56,7 +56,7 @@ public class StompMessagingProtocolImpl<String> implements StompMessagingProtoco
     private void handleUnsubscribe(String[] lines) {  }
     private void handleDisconnect(String[] lines) { }
     private void sendError(){}
-    private void reciept(){}
+    private void receipt(){}
 
 
 }
