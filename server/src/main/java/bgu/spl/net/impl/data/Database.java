@@ -250,4 +250,9 @@ private String repeat(String str, int times) {
 
 private static class Instance {
 	static Database instance = new Database();
-}}
+}
+
+public User getUser(int connectionId){
+	return connectionsIdMap.get(connectionId);
+}
+}

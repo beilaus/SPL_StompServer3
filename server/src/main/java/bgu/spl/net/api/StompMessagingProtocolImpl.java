@@ -9,34 +9,35 @@ public class StompMessagingProtocolImpl<String> implements StompMessagingProtoco
     private boolean shouldTerminate;
     private Connections<String> connections;
 
- public void start(int connectionId, Connections<String> connections){
-    this.id=connectionId;
-    this.connections=connections;
-    shouldTerminate=false;
- }
+    public void start(int connectionId, Connections<String> connections){
+        this.id=connectionId;
+        this.connections=connections;
+        shouldTerminate=false;
+    }
+
     
     public void process(String message){
-        String command="d";
-        switch (command) {
-        case "CONNECT":
-            handleConnect();
-            break;
+        String commands = message;
+        switch (commands) {
+            case "CONNECT":
+                handleConnect();
+                break;
 
-        case "SEND":
-            handleSend(lines);
-            break;
+            case "SEND":
+                handleSend();
+                break;
 
-        case "SUBSCRIBE":
-            handleSubscribe(lines);
-            break;
+            case "SUBSCRIBE":
+                handleSubscribe();
+                break;
 
-        case "UNSUBSCRIBE":
-            handleUnsubscribe(lines);
-            break;
+            case "UNSUBSCRIBE":
+                handleUnsubscribe();
+                break;
 
-        case "DISCONNECT":
-            handleDisconnect(lines);
-            break;
+            case "DISCONNECT":
+                handleDisconnect();
+                break;
         }
 
 
