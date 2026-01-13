@@ -2,6 +2,8 @@ package bgu.spl.net.srv;
 
 import bgu.spl.net.api.MessageEncoderDecoder;
 import bgu.spl.net.api.MessagingProtocol;
+import bgu.spl.net.api.StompMessagingProtocol;
+
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.ClosedSelectorException;
@@ -10,6 +12,7 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 public class Reactor<T> implements Server<T> {
@@ -17,11 +20,14 @@ public class Reactor<T> implements Server<T> {
     private final int port;
     private final Supplier<MessagingProtocol<T>> protocolFactory;
     private final Supplier<MessageEncoderDecoder<T>> readerFactory;
+    private final Supplier<StompMessagingProtocol<T>> sprotocolFactory;
     private final ActorThreadPool pool;
     private Selector selector;
 
     private Thread selectorThread;
     private final ConcurrentLinkedQueue<Runnable> selectorTasks = new ConcurrentLinkedQueue<>();
+    private ConnectionsImpl connections = new ConnectionsImpl();
+    private AtomicInteger connectionId = new AtomicInteger(0);
 
     public Reactor(
             int numThreads,
@@ -33,6 +39,19 @@ public class Reactor<T> implements Server<T> {
         this.port = port;
         this.protocolFactory = protocolFactory;
         this.readerFactory = readerFactory;
+        this.sprotocolFactory = null;
+    }
+    public Reactor(
+            int numThreads,
+            int port,
+            Supplier<StompMessagingProtocol<T>> sprotocolFactory,
+            Supplier<MessageEncoderDecoder<T>> readerFactory, boolean isStomp) {
+
+        this.pool = new ActorThreadPool(numThreads);
+        this.port = port;
+        this.sprotocolFactory = sprotocolFactory;
+        this.readerFactory = readerFactory;
+        this.protocolFactory = null;
     }
 
     @Override
@@ -95,11 +114,29 @@ public class Reactor<T> implements Server<T> {
     private void handleAccept(ServerSocketChannel serverChan, Selector selector) throws IOException {
         SocketChannel clientChan = serverChan.accept();
         clientChan.configureBlocking(false);
-        final NonBlockingConnectionHandler<T> handler = new NonBlockingConnectionHandler<>(
-                readerFactory.get(),
-                protocolFactory.get(),
-                clientChan,
-                this);
+
+
+        int currentId = connectionId.getAndIncrement();
+        NonBlockingConnectionHandler<T> handler;
+
+        if (sprotocolFactory != null) { //STOMP
+            StompMessagingProtocol<T> sprotocol = sprotocolFactory.get();
+            handler = new NonBlockingConnectionHandler<>(
+                    readerFactory.get(),
+                    sprotocol,
+                    clientChan,
+                    this);
+            sprotocol.start(currentId, (Connections<T>) connections);
+            connections.connect(currentId, (ConnectionHandler<String>)(ConnectionHandler)handler);
+        }
+
+        else{    
+            handler = new NonBlockingConnectionHandler<>(
+                    readerFactory.get(),
+                    protocolFactory.get(),
+                    clientChan,
+                    this);
+        }
         clientChan.register(selector, SelectionKey.OP_READ, handler);
     }
 

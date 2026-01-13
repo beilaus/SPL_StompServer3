@@ -2,6 +2,7 @@ package bgu.spl.net.srv;
 
 import bgu.spl.net.api.MessageEncoderDecoder;
 import bgu.spl.net.api.MessagingProtocol;
+import bgu.spl.net.api.StompMessagingProtocol;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -20,6 +21,7 @@ public class NonBlockingConnectionHandler<T> implements ConnectionHandler<T> {
     private final Queue<ByteBuffer> writeQueue = new ConcurrentLinkedQueue<>();
     private final SocketChannel chan;
     private final Reactor reactor;
+    private final StompMessagingProtocol<T> sprotocol;
 
     public NonBlockingConnectionHandler(
             MessageEncoderDecoder<T> reader,
@@ -30,6 +32,19 @@ public class NonBlockingConnectionHandler<T> implements ConnectionHandler<T> {
         this.encdec = reader;
         this.protocol = protocol;
         this.reactor = reactor;
+        this.sprotocol = null;
+    }
+
+    public NonBlockingConnectionHandler(
+            MessageEncoderDecoder<T> reader,
+            StompMessagingProtocol<T> sprotocol,
+            SocketChannel chan,
+            Reactor reactor) {
+        this.chan = chan;
+        this.encdec = reader;
+        this.sprotocol = sprotocol;
+        this.reactor = reactor;
+        this.protocol = null;
     }
 
     public Runnable continueRead() {
@@ -49,10 +64,15 @@ public class NonBlockingConnectionHandler<T> implements ConnectionHandler<T> {
                     while (buf.hasRemaining()) {
                         T nextMessage = encdec.decodeNextByte(buf.get());
                         if (nextMessage != null) {
-                            T response = protocol.process(nextMessage);
-                            if (response != null) {
-                                writeQueue.add(ByteBuffer.wrap(encdec.encode(response)));
-                                reactor.updateInterestedOps(chan, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+                            if(protocol != null){    
+                                T response = protocol.process(nextMessage);
+                                if (response != null) {
+                                    writeQueue.add(ByteBuffer.wrap(encdec.encode(response)));
+                                    reactor.updateInterestedOps(chan, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+                                }
+                            }
+                            else{
+                                sprotocol.process(nextMessage);
                             }
                         }
                     }
@@ -95,10 +115,17 @@ public class NonBlockingConnectionHandler<T> implements ConnectionHandler<T> {
                 close();
             }
         }
-
-        if (writeQueue.isEmpty()) {
-            if (protocol.shouldTerminate()) close();
-            else reactor.updateInterestedOps(chan, SelectionKey.OP_READ);
+        if(protocol != null){
+            if (writeQueue.isEmpty()) {
+                if (protocol.shouldTerminate()) close();
+                else reactor.updateInterestedOps(chan, SelectionKey.OP_READ);
+            }
+        }
+        else if(sprotocol != null){
+            if (writeQueue.isEmpty()) {
+                if (sprotocol.shouldTerminate()) close();
+                else reactor.updateInterestedOps(chan, SelectionKey.OP_READ);
+            }
         }
     }
 
@@ -118,6 +145,9 @@ public class NonBlockingConnectionHandler<T> implements ConnectionHandler<T> {
 
     @Override
     public void send(T msg) {
-        //IMPLEMENT IF NEEDED
+        if (msg != null) {
+            writeQueue.add(ByteBuffer.wrap(encdec.encode(msg)));
+            reactor.updateInterestedOps(chan, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+        }
     }
 }

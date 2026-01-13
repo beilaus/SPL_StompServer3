@@ -21,26 +21,31 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
         this.connections = connections;
     }
 
+    public void start(int connectionId, ConnectionsImpl connections) {
+        this.connectionId = connectionId;
+        this.connections = connections;
+    }
+
     @Override
     public void process(String message) {
-        // 1. Split Command, Headers, and Body
-        String[] parts = message.split("\n\n", 2);
+        String[] parts = message.split("\n\n", 2); //Breaking down the given message to parts
         String headerSection = parts[0];
-        String body = (parts.length > 1) ? parts[1] : "";
+        String body = "";
+        if(parts.length > 1){
+            body = parts[1];
+        }
 
-        // 2. Parse Command and Headers
         String[] headerLines = headerSection.split("\n");
         String command = headerLines[0].trim();
         Map<String, String> headers = parseHeaders(headerLines);
-
-        // 3. Validation: Must be logged in for any command except CONNECT
-        if (!isLoggedIn && !command.equals("CONNECT")) {
-            sendError(headers.get("receipt"), "Not logged in", "You must connect first.");
-            shouldTerminate = true; // Strict STOMP behavior often disconnects on protocol violation
+        if(headers == null){
             return;
         }
-
-        // 4. Dispatch Command
+        if (!isLoggedIn && !command.equals("CONNECT")) {
+            sendError(headers.get("receipt"), "Not logged in", "User must connect first.");
+            shouldTerminate = true;
+            return;
+        }
         switch (command) {
             case "CONNECT":
                 handleConnect(headers);
@@ -74,14 +79,15 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
         String host = headers.get("host");
         String login = headers.get("login");
         String passcode = headers.get("passcode");
+        String receipt = headers.get("receipt");
 
         if (!"1.2".equals(version)) {
-            sendError(null, "Version mismatch", "Supported version is 1.2");
+            sendError(receipt, "Version mismatch", "Correct version is 1.2");
             shouldTerminate = true;
             return;
         }
         if (!"stomp.cs.bgu.ac.il".equals(host)) {
-            sendError(null, "Invalid Host", "Host must be stomp.cs.bgu.ac.il");
+            sendError(receipt, "Invalid Host", "Host must be stomp.cs.bgu.ac.il");
             shouldTerminate = true;
             return;
         }
@@ -90,14 +96,21 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
 
         if (status == LoginStatus.LOGGED_IN_SUCCESSFULLY || status == LoginStatus.ADDED_NEW_USER) {
             isLoggedIn = true;
-            String response = "CONNECTED\n" +
-                              "version:1.2\n" +
-                              "\n"; 
+            String response = "CONNECTED\n"+"version:1.2\n\n";
             connections.send(connectionId, response);
-        } else {
-            String errDetail = (status == LoginStatus.WRONG_PASSWORD) ? "Wrong password" : 
-                               (status == LoginStatus.ALREADY_LOGGED_IN) ? "User already logged in" : "Login failed";
-            sendError(null, "Login Failed", errDetail);
+            if(receipt != null){
+                sendReceipt(receipt);
+            }
+        } 
+        else {
+            String errorMsg = "Login failed";
+            if(status == LoginStatus.WRONG_PASSWORD){
+                errorMsg = "Wrong password";
+            }
+            else if(status == LoginStatus.ALREADY_LOGGED_IN){
+                errorMsg = "User already logged in";
+            }
+            sendError(receipt, "Login Failed", errorMsg);
             shouldTerminate = true;
         }
     }
@@ -108,45 +121,55 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
         String receipt = headers.get("receipt");
 
         if (destination == null || idStr == null) {
-            sendError(receipt, "Malformed Frame", "Missing 'destination' or 'id' header.");
+            sendError(receipt, "Invalid header", "Missing 'destination' or 'id' header.");
             return;
         }
 
         try {
             int subId = Integer.parseInt(idStr);
-            // Safe cast since we know the implementation
             if (connections instanceof ConnectionsImpl) {
-                ((ConnectionsImpl<String>) connections).addClientToTopic(connectionId, subId, destination);
+                if(((ConnectionsImpl) connections).clientAlreadySubscribedByTopic(connectionId, destination) 
+                    || ((ConnectionsImpl) connections).clientDuplicateSubId(connectionId, subId)){
+                    sendError(receipt, "Invalid subscription", "Client already subscribed to topic or used an existing sub id");
+                    shouldTerminate = true;
+                    return;
+                }
+                ((ConnectionsImpl) connections).addClientToTopic(connectionId, subId, destination);
             }
-            
             if (receipt != null) {
                 sendReceipt(receipt);
             }
-        } catch (NumberFormatException e) {
-            sendError(receipt, "Malformed Frame", "Subscription ID must be an integer.");
+        } 
+        catch (NumberFormatException e) {
+            sendError(receipt, "Invalid header", "Subscription ID must be a number.");
         }
     }
 
     private void handleUnsubscribe(Map<String, String> headers) {
-        String idStr = headers.get("id");
+        String subIdStr = headers.get("id");
         String receipt = headers.get("receipt");
 
-        if (idStr == null) {
-            sendError(receipt, "Malformed Frame", "Missing 'id' header.");
+        if (subIdStr == null) {
+            sendError(receipt, "Invalid header", "Missing 'id' header.");
             return;
         }
 
         try {
-            int subId = Integer.parseInt(idStr);
+            int subId = Integer.parseInt(subIdStr);
             if (connections instanceof ConnectionsImpl) {
-                ((ConnectionsImpl<String>) connections).removeClientFromTopic(connectionId, subId);
+                if(!((ConnectionsImpl) connections).clientAlreadySubscribedBySubId(connectionId ,subId)){
+                    sendError(receipt, "Invalid unsubscribtion", "Client is not subscribed with this sub id");
+                    shouldTerminate = true;
+                    return;
+                }
+                ((ConnectionsImpl) connections).removeClientFromTopic(connectionId, subId);
             }
-
             if (receipt != null) {
                 sendReceipt(receipt);
             }
-        } catch (NumberFormatException e) {
-            sendError(receipt, "Malformed Frame", "Subscription ID must be an integer.");
+        } 
+        catch (NumberFormatException e) {
+            sendError(receipt, "Invalid header", "Subscription ID must be a number.");
         }
     }
 
@@ -155,33 +178,28 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
         String receipt = headers.get("receipt");
 
         if (destination == null) {
-            sendError(receipt, "Malformed Frame", "Missing 'destination' header.");
+            sendError(receipt, "Invalid header", "Missing 'destination' header.");
+            shouldTerminate = true;
             return;
         }
 
-        // Check if client is subscribed to the topic they are sending to
         boolean isSubscribed = false;
         if (connections instanceof ConnectionsImpl) {
-            isSubscribed = ((ConnectionsImpl<String>) connections).clientAlreadySubscribed(connectionId, destination);
+            if(!((ConnectionsImpl) connections).TopicExists(destination)){
+                sendError(receipt, "Invalid message", "destination does not exist");
+                shouldTerminate = true;
+                return;
+            }
+            isSubscribed = ((ConnectionsImpl) connections).clientAlreadySubscribedByTopic(connectionId, destination);
         }
 
         if (!isSubscribed) {
-            sendError(receipt, "Access Denied", "You are not subscribed to " + destination);
+            sendError(receipt, "Access Denied", "Client is not subscribed to " + destination);
+            shouldTerminate = true;
             return;
         }
-
-        // Construct the MESSAGE frame
-        // Note: In a real STOMP server, 'subscription' header should match the receiver's ID.
-        // With the current Connections interface, we broadcast the same String to all.
-        String msgFrame = "MESSAGE\n" +
-                          "destination:" + destination + "\n" +
-                          "message-id:" + System.currentTimeMillis() + "\n" +
-                          "subscription:0\n" + 
-                          "\n" +
-                          body;
-
-        connections.send(destination, msgFrame);
-
+        String msgFrameBody = body;
+        connections.send(destination, msgFrameBody);
         if (receipt != null) {
             sendReceipt(receipt);
         }
@@ -189,10 +207,12 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
 
     private void handleDisconnect(Map<String, String> headers) {
         String receipt = headers.get("receipt");
-        if (receipt != null) {
-            sendReceipt(receipt);
+        if (receipt == null) {
+            sendError(receipt, "Invalid header", "Missing 'receipt' header.");
+            shouldTerminate = true;
+            return;
         }
-        
+        sendReceipt(receipt);
         isLoggedIn = false;
         shouldTerminate = true;
         
@@ -200,12 +220,9 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
         Database.getInstance().logout(connectionId);
     }
 
-    // ================= Helper Methods =================
-
+    
     private void sendReceipt(String receiptId) {
-        String frame = "RECEIPT\n" +
-                       "receipt-id:" + receiptId + "\n" +
-                       "\n";
+        String frame = "RECEIPT\nreceipt-id:" + receiptId + "\n\n";
         connections.send(connectionId, frame);
     }
 
@@ -225,14 +242,32 @@ public class StompProtocolImpl implements StompMessagingProtocol<String> {
 
     private Map<String, String> parseHeaders(String[] headerLines) {
         Map<String, String> map = new HashMap<>();
-        // Start from 1 to skip the command line
+        
+        String receipt = "";
         for (int i = 1; i < headerLines.length; i++) {
             String line = headerLines[i].trim();
-            if (line.isEmpty()) continue;
+            if (line.isEmpty()){
+                for(String isReceipt : headerLines){
+                    if(isReceipt.startsWith("receipt")){
+                        receipt = isReceipt;
+                        sendError(isReceipt, "Incorrect Headers", "Found an empty line within the headers");
+                        shouldTerminate = true;
+                        return null;
+                    }
+                }
+                sendError(receipt, "Incorrect Headers", "Found an empty line within the headers");
+                shouldTerminate = true;
+                return null;
+            }
             
             String[] parts = line.split(":", 2);
             if (parts.length == 2) {
                 map.put(parts[0].trim(), parts[1].trim());
+            }
+            else{
+                sendError(receipt, "Incorrect Headers", "Missing ':' in header");
+                shouldTerminate = true;
+                return null;
             }
         }
         return map;
